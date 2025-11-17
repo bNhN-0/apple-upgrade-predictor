@@ -10,7 +10,7 @@ from firebase_admin import credentials, firestore
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
     page_title="Apple Upgrade Prediction Dashboard",
-    page_icon="🍏",
+    page_icon="",
     layout="wide"
 )
 
@@ -56,7 +56,7 @@ df = load_data()
 
 # ---------------- EMPTY STATE ----------------
 if df.empty:
-    st.title("🍏 Apple Upgrade Prediction Dashboard")
+    st.title(" Apple Upgrade Prediction Dashboard")
     st.error("No documents found in Firestore. Run your batch script to push data first.")
     st.stop()
 
@@ -65,7 +65,7 @@ df["forcing_term"] = pd.to_numeric(df["forcing_term"], errors="coerce")
 df = df.dropna(subset=["forcing_term"])
 
 if df.empty:
-    st.title("🍏 Apple Upgrade Prediction Dashboard")
+    st.title(" Apple Upgrade Prediction Dashboard")
     st.error("All forcing_term values are missing or invalid.")
     st.stop()
 

@@ -9,7 +9,7 @@ from firebase_admin import credentials, firestore
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
     page_title="Apple Upgrade Prediction Dashboard",
-    page_icon="🍏",
+    page_icon="",
     layout="wide"
 )
 
@@ -58,12 +58,12 @@ if "forcing_term" in df.columns:
 
 # ---------------- EMPTY STATE ----------------
 if df.empty:
-    st.title("🍏 Apple Upgrade Prediction Dashboard")
+    st.title(" Apple Upgrade Prediction Dashboard")
     st.error("No documents found in Firestore or forcing_term values are invalid. Run your batch script to push data first.")
     st.stop()
 
 # ---------------- SIDEBAR FILTERS ----------------
-st.sidebar.title("🔎 Filters")
+st.sidebar.title(" Filters")
 
 decision_options = ["Upgrade Soon", "Delay Upgrade", "Churn Risk"]
 selected_decisions = st.sidebar.multiselect(
