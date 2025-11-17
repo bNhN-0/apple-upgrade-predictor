@@ -18,18 +18,71 @@ st.set_page_config(
 def get_db():
     """Initialize Firebase Admin only once (Streamlit reruns the script a lot)."""
     if not firebase_admin._apps:
-        # Convert Streamlit secrets section to a plain dict for firebase_admin
+        # Read service account from [firebase] section in Streamlit secrets
         firebase_creds = dict(st.secrets["firebase"])
         cred = credentials.Certificate(firebase_creds)
         firebase_admin.initialize_app(cred)
     return firestore.client()
-db = get_db()
-COLLECTION_NAME = "apple_upgrade_predictions"
 
-# ---------------- LOAD DATA ----------------
+db = get_db()
+TARGET_COLLECTION = "apple_upgrade_predictions"
+
+# ---------------- MODEL LOGIC ----------------
+def compute_forcing_term(DA, BH, TI, ENG, PU, SI, PS):
+    dt = 0.01
+    eta = 0.9
+    alpha = 0.7
+    omega = 0.5
+    t = 800
+
+    X = np.zeros(t)
+    Y = np.zeros(t)
+    S = np.zeros(t)
+    forcing_term = np.zeros(t)
+
+    # initial conditions
+    X[0] = alpha * (1 - BH) + (1 - alpha) * DA
+    Y[0] = (omega * DA + omega * (1 - BH)) * PS
+    S[0] = X[0] * (1 - Y[0])
+    forcing_term[0] = 0.1
+
+    for k in range(1, t):
+
+        # Need
+        N = (DA + TI + ENG + PU + SI) / 5.0
+
+        # Bonding
+        B = (ENG + PU + SI) / 3.0
+
+        # Hesitation factor
+        H = ((1 - DA) + BH + (1 - TI) + (1 - ENG) +
+             (1 - PU) + (1 - SI) + PS * (1 - TI)) / 7.0
+
+        # hidden layer 2
+        X[k] = alpha * B + (1 - alpha) * N - (alpha * H)
+        Y[k] = (omega * N + omega * B) * H
+        S[k] = X[k] * (1 - Y[k])
+
+        # output layer
+        forcing_term[k] = forcing_term[k - 1] + eta * (S[k - 1] - forcing_term[k - 1]) * dt
+
+    return float(forcing_term[-1])
+
+
+def classify_forcing_term(value: float) -> str:
+    value = round(value, 2)
+    if value >= 0.60:
+        return "Upgrade Soon"
+    elif value >= 0.10:
+        return "Delay Upgrade"
+    else:
+        return "Churn Risk"
+
+
+# ---------------- DATA LOADING FROM FIRESTORE ----------------
 @st.cache_data
-def load_data():
-    docs = list(db.collection(COLLECTION_NAME).stream())
+def load_data_from_firestore():
+    docs = list(db.collection(TARGET_COLLECTION).stream())
     rows = []
     for doc in docs:
         d = doc.to_dict()
@@ -43,33 +96,127 @@ def load_data():
             "SI": d.get("SI"),
             "PS": d.get("PS"),
             "forcing_term": d.get("forcing_term"),
-            "decision": d.get("decision")
+            "decision": d.get("decision"),
+            "created_at": d.get("created_at")
         })
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if "forcing_term" in df.columns:
+        df["forcing_term"] = pd.to_numeric(df["forcing_term"], errors="coerce")
+        df = df.dropna(subset=["forcing_term"])
+    return df
 
-df = load_data()
 
-# Ensure forcing_term is numeric and valid
-if "forcing_term" in df.columns:
-    df["forcing_term"] = pd.to_numeric(df["forcing_term"], errors="coerce")
-    df = df.dropna(subset=["forcing_term"])
+# ---------------- MAIN APP ----------------
+st.title(" Apple Upgrade Prediction Dashboard")
+st.caption("Upload raw CSV → compute forcing_term & decision → store in Firestore → explore insights.")
 
-# ---------------- EMPTY STATE ----------------
+# Load existing data (may be empty)
+df = load_data_from_firestore()
+
+tab_overview, tab_segments, tab_user, tab_loader = st.tabs([
+    "📊 Overview",
+    "🧩 Segment Insights",
+    "👤 User Explorer",
+    "📥 Data Loader (CSV → Firebase)"
+])
+
+# ========== TAB 4: DATA LOADER ==========
+with tab_loader:
+    st.subheader("📥 Upload CSV, Compute Forcing Term, and Save to Firebase")
+
+    st.markdown(
+        """
+        **How it works:**
+        1. Upload a CSV file that contains at least these columns:  
+           `id`, `DA`, `BH`, `TI`, `ENG`, `PU`, `SI`, `PS`  
+        2. The app computes `forcing_term` using your model.  
+        3. Each row is saved into Firestore collection `apple_upgrade_predictions`.  
+        4. Data will appear in the dashboard tabs after processing.
+        """
+    )
+
+    uploaded_file = st.file_uploader("Upload raw user dataset (CSV)", type=["csv"])
+
+    if uploaded_file is not None:
+        try:
+            raw_df = pd.read_csv(uploaded_file)
+        except Exception as e:
+            st.error(f"Failed to read CSV: {e}")
+            raw_df = None
+
+        if raw_df is not None:
+            st.write("Preview of uploaded data:")
+            st.dataframe(raw_df.head())
+
+            required_cols = ["id", "DA", "BH", "TI", "ENG", "PU", "SI", "PS"]
+            missing = [c for c in required_cols if c not in raw_df.columns]
+
+            if missing:
+                st.error(f"Missing required columns in CSV: {missing}")
+            else:
+                if st.button("🚀 Compute & Save to Firebase"):
+                    with st.spinner("Processing rows and saving to Firestore..."):
+                        processed_count = 0
+                        for _, row in raw_df.iterrows():
+                            try:
+                                user_id = str(row["id"])
+                                DA = float(row["DA"])
+                                BH = float(row["BH"])
+                                TI = float(row["TI"])
+                                ENG = float(row["ENG"])
+                                PU = float(row["PU"])
+                                SI = float(row["SI"])
+                                PS = float(row["PS"])
+
+                                raw_value = compute_forcing_term(DA, BH, TI, ENG, PU, SI, PS)
+                                forcing_value = round(raw_value, 3)
+                                decision = classify_forcing_term(forcing_value)
+
+                                out_doc = {
+                                    "DA": DA,
+                                    "BH": BH,
+                                    "TI": TI,
+                                    "ENG": ENG,
+                                    "PU": PU,
+                                    "SI": SI,
+                                    "PS": PS,
+                                    "forcing_term": forcing_value,
+                                    "decision": decision,
+                                    "source_id": user_id,
+                                    "created_at": firestore.SERVER_TIMESTAMP,
+                                }
+
+                                db.collection(TARGET_COLLECTION).document(user_id).set(out_doc)
+                                processed_count += 1
+                            except Exception as e:
+                                # Don't crash entire run for one bad row
+                                st.warning(f"Skipping row with id={row.get('id', 'N/A')} due to error: {e}")
+
+                        # Clear cached Firestore data so new rows appear
+                        load_data_from_firestore.clear()
+                        st.success(f"Done! Processed and saved {processed_count} rows to Firestore.")
+                        st.info("Go back to the other tabs to explore the updated dashboard.")
+
+# If no data yet, stop other tabs early
 if df.empty:
-    st.title(" Apple Upgrade Prediction Dashboard")
-    st.error("No documents found in Firestore or forcing_term values are invalid. Run your batch script to push data first.")
+    with tab_overview:
+        st.warning("No computed data in Firestore yet. Use the **📥 Data Loader** tab to upload a CSV first.")
+    with tab_segments:
+        st.info("Segment insights will appear after you load and compute data.")
+    with tab_user:
+        st.info("User Explorer will be available once data exists in Firestore.")
     st.stop()
 
-# ---------------- SIDEBAR FILTERS ----------------
-st.sidebar.title(" Filters")
+# ---------------- FILTERS (shared by tabs, only if data exists) ----------------
+st.sidebar.title("🔎 Filters")
 
 decision_options = ["Upgrade Soon", "Delay Upgrade", "Churn Risk"]
 selected_decisions = st.sidebar.multiselect(
     "Decision segment",
     options=decision_options,
-    default=decision_options  # show all by default
+    default=decision_options
 )
 
 forcing_min_val = float(df["forcing_term"].min())
@@ -83,18 +230,12 @@ forcing_min, forcing_max = st.sidebar.slider(
     step=0.05
 )
 
-# Apply filters
 filtered_df = df[
     df["decision"].isin(selected_decisions) &
     (df["forcing_term"] >= forcing_min) &
     (df["forcing_term"] <= forcing_max)
 ].copy()
 
-# ---------------- HEADER ----------------
-st.title("Apple Upgrade Prediction Dashboard")
-st.caption(f"Data source: Firestore collection `{COLLECTION_NAME}`")
-
-# ---------------- KPI CARDS ----------------
 total_users = len(filtered_df)
 avg_forcing = filtered_df["forcing_term"].mean() if total_users else 0.0
 
@@ -106,25 +247,24 @@ upgrade_rate = (upgrade_count / total_users * 100) if total_users else 0
 delay_rate   = (delay_count   / total_users * 100) if total_users else 0
 churn_rate   = (churn_count   / total_users * 100) if total_users else 0
 
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-with kpi1:
-    st.metric("Total Users (filtered)", total_users)
-with kpi2:
-    st.metric("Avg. Forcing Term", f"{avg_forcing:.3f}")
-with kpi3:
-    st.metric("Upgrade Soon (%)", f"{upgrade_rate:.1f}%")
-with kpi4:
-    st.metric("Delay Upgrade (%)", f"{delay_rate:.1f}%")
-
-st.write(f"Churn Risk users: **{churn_count}** ({churn_rate:.1f}%)")
-
-st.markdown("---")
-
-# ---------------- TABS ----------------
-tab1, tab2, tab3 = st.tabs(["📊 Overview", "🧩 Segment Insights", "👤 User Explorer"])
-
 # ========== TAB 1: OVERVIEW ==========
-with tab1:
+with tab_overview:
+    st.subheader("Overview")
+
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    with kpi1:
+        st.metric("Total Users (filtered)", total_users)
+    with kpi2:
+        st.metric("Avg. Forcing Term", f"{avg_forcing:.3f}")
+    with kpi3:
+        st.metric("Upgrade Soon (%)", f"{upgrade_rate:.1f}%")
+    with kpi4:
+        st.metric("Delay Upgrade (%)", f"{delay_rate:.1f}%")
+
+    st.write(f"Churn Risk users: **{churn_count}** ({churn_rate:.1f}%)")
+
+    st.markdown("---")
+
     col_left, col_right = st.columns([2, 1])
 
     with col_left:
@@ -137,18 +277,15 @@ with tab1:
 
     with col_right:
         st.subheader("Decision Breakdown")
-
         if not filtered_df.empty:
             decision_counts = (
                 filtered_df["decision"]
                 .value_counts()
                 .reindex(decision_options, fill_value=0)
             )
-
             fig, ax = plt.subplots()
             labels = decision_counts.index.tolist()
             sizes = decision_counts.values.tolist()
-
             if sizes and sum(sizes) > 0:
                 ax.pie(
                     sizes,
@@ -176,7 +313,7 @@ with tab1:
         st.info("No data available for current filters.")
 
 # ========== TAB 2: SEGMENT INSIGHTS ==========
-with tab2:
+with tab_segments:
     st.subheader("Segment Insights")
 
     feature_cols = ["DA", "BH", "TI", "ENG", "PU", "SI", "PS", "forcing_term"]
@@ -191,10 +328,9 @@ with tab2:
             seg_df
             .groupby("decision")[feature_cols]
             .mean()
-            .reindex(decision_options)  # consistent order
+            .reindex(decision_options)
         )
 
-        # --- Highlight key insight ---
         if "Upgrade Soon" in seg_stats.index:
             upgrade_means = seg_stats.loc["Upgrade Soon", feature_cols[:-1]]  # exclude forcing_term
             upgrade_means = upgrade_means.dropna()
@@ -225,7 +361,6 @@ with tab2:
 
         st.markdown("### Inputs vs Forcing Term (Correlation Heatmap)")
         corr = seg_df[feature_cols].corr()
-
         fig_corr, ax_corr = plt.subplots()
         cax = ax_corr.imshow(corr, interpolation="nearest")
         ax_corr.set_xticks(range(len(feature_cols)))
@@ -236,7 +371,7 @@ with tab2:
         st.pyplot(fig_corr)
 
 # ========== TAB 3: USER EXPLORER ==========
-with tab3:
+with tab_user:
     st.subheader("User Explorer")
 
     if filtered_df.empty:
@@ -253,11 +388,8 @@ with tab3:
 
         with col1:
             st.markdown("#### Upgrade Readiness")
-
             st.metric("Decision", user_row["decision"])
             st.metric("Forcing Term", f"{user_row['forcing_term']:.3f}")
-
-            # Simple normalized readiness bar
             norm_value = np.clip((user_row["forcing_term"] + 0.2) / 1.0, 0, 1)
             st.progress(float(norm_value))
 
@@ -286,6 +418,6 @@ with tab3:
 
         st.markdown("---")
         st.caption(
-            "Tip: Use the filters in the sidebar to narrow down to Upgrade, Delay, or Churn segments, "
+            "Use the sidebar filters to focus on specific decision segments, "
             "then inspect individual users here."
         )
