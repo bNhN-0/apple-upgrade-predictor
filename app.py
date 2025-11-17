@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import json
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -18,13 +19,17 @@ st.set_page_config(
 def get_db():
     """Initialize Firebase Admin only once (Streamlit reruns the script a lot)."""
     if not firebase_admin._apps:
-        cred = credentials.Certificate("serviceAccountKey.json")
+        # Load service account JSON from Streamlit secrets
+        # Make sure FIREBASE_SERVICE_ACCOUNT is set in Streamlit Secrets
+        service_account_info = json.loads(st.secrets["FIREBASE_SERVICE_ACCOUNT"])
+        cred = credentials.Certificate(service_account_info)
         firebase_admin.initialize_app(cred)
     return firestore.client()
 
 db = get_db()
 COLLECTION_NAME = "apple_upgrade_predictions"
 
+# ---------------- LOAD DATA ----------------
 @st.cache_data
 def load_data():
     docs = list(db.collection(COLLECTION_NAME).stream())
@@ -49,10 +54,15 @@ def load_data():
 
 df = load_data()
 
+# Ensure forcing_term is numeric and valid
+if "forcing_term" in df.columns:
+    df["forcing_term"] = pd.to_numeric(df["forcing_term"], errors="coerce")
+    df = df.dropna(subset=["forcing_term"])
+
 # ---------------- EMPTY STATE ----------------
 if df.empty:
     st.title("🍏 Apple Upgrade Prediction Dashboard")
-    st.error("No documents found in Firestore. Run your batch script to push data first.")
+    st.error("No documents found in Firestore or forcing_term values are invalid. Run your batch script to push data first.")
     st.stop()
 
 # ---------------- SIDEBAR FILTERS ----------------
@@ -65,11 +75,14 @@ selected_decisions = st.sidebar.multiselect(
     default=decision_options  # show all by default
 )
 
+forcing_min_val = float(df["forcing_term"].min())
+forcing_max_val = float(df["forcing_term"].max())
+
 forcing_min, forcing_max = st.sidebar.slider(
     "Forcing term range",
-    float(df["forcing_term"].min()),
-    float(df["forcing_term"].max()),
-    (float(df["forcing_term"].min()), float(df["forcing_term"].max())),
+    forcing_min_val,
+    forcing_max_val,
+    (forcing_min_val, forcing_max_val),
     step=0.05
 )
 
@@ -86,7 +99,7 @@ st.caption(f"Data source: Firestore collection `{COLLECTION_NAME}`")
 
 # ---------------- KPI CARDS ----------------
 total_users = len(filtered_df)
-avg_forcing = filtered_df["forcing_term"].mean()
+avg_forcing = filtered_df["forcing_term"].mean() if total_users else 0.0
 
 upgrade_count = int((filtered_df["decision"] == "Upgrade Soon").sum())
 delay_count   = int((filtered_df["decision"] == "Delay Upgrade").sum())
@@ -119,42 +132,51 @@ with tab1:
 
     with col_left:
         st.subheader("Forcing Term by User")
-        line_df = filtered_df.sort_values("forcing_term").set_index("id")[["forcing_term"]]
-        st.line_chart(line_df)
+        if not filtered_df.empty:
+            line_df = filtered_df.sort_values("forcing_term").set_index("id")[["forcing_term"]]
+            st.line_chart(line_df)
+        else:
+            st.info("No data available for current filters.")
 
     with col_right:
         st.subheader("Decision Breakdown")
 
-        decision_counts = (
-            filtered_df["decision"]
-            .value_counts()
-            .reindex(decision_options, fill_value=0)
-        )
-
-        fig, ax = plt.subplots()
-        labels = decision_counts.index.tolist()
-        sizes = decision_counts.values.tolist()
-
-        if sizes and sum(sizes) > 0:
-            ax.pie(
-                sizes,
-                labels=labels,
-                autopct="%1.0f%%",
-                startangle=90
+        if not filtered_df.empty:
+            decision_counts = (
+                filtered_df["decision"]
+                .value_counts()
+                .reindex(decision_options, fill_value=0)
             )
-            ax.axis("equal")
-            st.pyplot(fig)
+
+            fig, ax = plt.subplots()
+            labels = decision_counts.index.tolist()
+            sizes = decision_counts.values.tolist()
+
+            if sizes and sum(sizes) > 0:
+                ax.pie(
+                    sizes,
+                    labels=labels,
+                    autopct="%1.0f%%",
+                    startangle=90
+                )
+                ax.axis("equal")
+                st.pyplot(fig)
+            else:
+                st.info("No data available for current filters.")
         else:
             st.info("No data available for current filters.")
 
     st.markdown("### Forcing Term Distribution")
-    arr = filtered_df["forcing_term"].to_numpy()
-    fig_hist, ax_hist = plt.subplots()
-    ax_hist.hist(arr, bins=10, edgecolor="black")
-    ax_hist.set_xlabel("Forcing term value")
-    ax_hist.set_ylabel("Frequency")
-    ax_hist.set_title("Distribution of forcing_term")
-    st.pyplot(fig_hist)
+    if not filtered_df.empty:
+        arr = filtered_df["forcing_term"].to_numpy()
+        fig_hist, ax_hist = plt.subplots()
+        ax_hist.hist(arr, bins=10, edgecolor="black")
+        ax_hist.set_xlabel("Forcing term value")
+        ax_hist.set_ylabel("Frequency")
+        ax_hist.set_title("Distribution of forcing_term")
+        st.pyplot(fig_hist)
+    else:
+        st.info("No data available for current filters.")
 
 # ========== TAB 2: SEGMENT INSIGHTS ==========
 with tab2:
@@ -162,51 +184,59 @@ with tab2:
 
     feature_cols = ["DA", "BH", "TI", "ENG", "PU", "SI", "PS", "forcing_term"]
 
-    seg_stats = (
-        filtered_df
-        .groupby("decision")[feature_cols]
-        .mean()
-        .reindex(decision_options)  # consistent order
-    )
+    seg_df = filtered_df.copy()
+    seg_df[feature_cols] = seg_df[feature_cols].apply(pd.to_numeric, errors="coerce")
 
-    # --- Highlight key insight ---
-    if "Upgrade Soon" in seg_stats.index:
-        upgrade_means = seg_stats.loc["Upgrade Soon", feature_cols[:-1]]  # exclude forcing_term
-        top_driver = upgrade_means.idxmax()
-        st.info(
-            f"**Top driver for 'Upgrade Soon' users:** `{top_driver}` "
-            f"(avg = {upgrade_means.max():.3f})"
+    if seg_df.empty:
+        st.info("Not enough data to compute segment insights for current filters.")
+    else:
+        seg_stats = (
+            seg_df
+            .groupby("decision")[feature_cols]
+            .mean()
+            .reindex(decision_options)  # consistent order
         )
 
-    st.markdown("### Compare Features Across Segments")
+        # --- Highlight key insight ---
+        if "Upgrade Soon" in seg_stats.index:
+            upgrade_means = seg_stats.loc["Upgrade Soon", feature_cols[:-1]]  # exclude forcing_term
+            upgrade_means = upgrade_means.dropna()
+            if not upgrade_means.empty:
+                top_driver = upgrade_means.idxmax()
+                st.info(
+                    f"**Top driver for 'Upgrade Soon' users:** `{top_driver}` "
+                    f"(avg = {upgrade_means.max():.3f})"
+                )
 
-    selected_feature = st.selectbox(
-        "Select a feature to compare:",
-        options=feature_cols,
-        index=feature_cols.index("forcing_term")
-    )
+        st.markdown("### Compare Features Across Segments")
 
-    feat_df = seg_stats[[selected_feature]].reset_index()
-    feat_df.rename(columns={selected_feature: "value"}, inplace=True)
+        selected_feature = st.selectbox(
+            "Select a feature to compare:",
+            options=feature_cols,
+            index=feature_cols.index("forcing_term")
+        )
 
-    st.bar_chart(
-        data=feat_df,
-        x="decision",
-        y="value",
-        use_container_width=True
-    )
+        feat_df = seg_stats[[selected_feature]].reset_index()
+        feat_df.rename(columns={selected_feature: "value"}, inplace=True)
 
-    st.markdown("### Inputs vs Forcing Term (Correlation Heatmap)")
-    corr = filtered_df[feature_cols].corr()
+        st.bar_chart(
+            data=feat_df,
+            x="decision",
+            y="value",
+            use_container_width=True
+        )
 
-    fig_corr, ax_corr = plt.subplots()
-    cax = ax_corr.imshow(corr, interpolation="nearest")
-    ax_corr.set_xticks(range(len(feature_cols)))
-    ax_corr.set_yticks(range(len(feature_cols)))
-    ax_corr.set_xticklabels(feature_cols, rotation=45, ha="right")
-    ax_corr.set_yticklabels(feature_cols)
-    fig_corr.colorbar(cax)
-    st.pyplot(fig_corr)
+        st.markdown("### Inputs vs Forcing Term (Correlation Heatmap)")
+        corr = seg_df[feature_cols].corr()
+
+        fig_corr, ax_corr = plt.subplots()
+        cax = ax_corr.imshow(corr, interpolation="nearest")
+        ax_corr.set_xticks(range(len(feature_cols)))
+        ax_corr.set_yticks(range(len(feature_cols)))
+        ax_corr.set_xticklabels(feature_cols, rotation=45, ha="right")
+        ax_corr.set_yticklabels(feature_cols)
+        fig_corr.colorbar(cax)
+        st.pyplot(fig_corr)
 
 # ========== TAB 3: USER EXPLORER ==========
 with tab3:
