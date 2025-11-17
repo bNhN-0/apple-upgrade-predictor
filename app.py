@@ -2,7 +2,6 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import json
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -19,10 +18,8 @@ st.set_page_config(
 def get_db():
     """Initialize Firebase Admin only once (Streamlit reruns the script a lot)."""
     if not firebase_admin._apps:
-        # Load service account JSON from Streamlit secrets
-        # Make sure FIREBASE_SERVICE_ACCOUNT is set in Streamlit Secrets
-        service_account_info = json.loads(st.secrets["FIREBASE_SERVICE_ACCOUNT"])
-        cred = credentials.Certificate(service_account_info)
+        # Read service account directly from [firebase] section in Streamlit secrets
+        cred = credentials.Certificate(st.secrets["firebase"])
         firebase_admin.initialize_app(cred)
     return firestore.client()
 
