@@ -18,11 +18,11 @@ st.set_page_config(
 def get_db():
     """Initialize Firebase Admin only once (Streamlit reruns the script a lot)."""
     if not firebase_admin._apps:
-        # Read service account directly from [firebase] section in Streamlit secrets
-        cred = credentials.Certificate(st.secrets["firebase"])
+        # Convert Streamlit secrets section to a plain dict for firebase_admin
+        firebase_creds = dict(st.secrets["firebase"])
+        cred = credentials.Certificate(firebase_creds)
         firebase_admin.initialize_app(cred)
     return firestore.client()
-
 db = get_db()
 COLLECTION_NAME = "apple_upgrade_predictions"
 
