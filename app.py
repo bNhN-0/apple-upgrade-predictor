@@ -147,7 +147,8 @@ with st.sidebar:
     st.markdown("### Data controls")
     if st.button("Refresh data from Firestore"):
         load_data_from_firestore.clear()
-        st.experimental_rerun()
+        st.rerun()   # <--- updated from experimental_rerun
+
 
 # Load existing data (may be empty initially)
 df = load_data_from_firestore()
@@ -406,7 +407,7 @@ with tab_segments:
             data=feat_df,
             x="decision",
             y="value",
-            use_container_width=True,
+            width="stretch",
         )
 
         st.markdown("### Correlation between inputs and forcing term")
@@ -463,7 +464,7 @@ with tab_user:
                 data=profile_df,
                 x="Feature",
                 y="Value",
-                use_container_width=True,
+                width="stretch",
             )
 
         st.markdown("---")
