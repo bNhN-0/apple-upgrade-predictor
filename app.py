@@ -142,6 +142,13 @@ st.caption(
     "store them in Firestore, and explore the results interactively."
 )
 
+# --------- REFRESH CONTROL (fix for stale cache after manual Firestore changes) ---------
+with st.sidebar:
+    st.markdown("### Data controls")
+    if st.button("Refresh data from Firestore"):
+        load_data_from_firestore.clear()
+        st.experimental_rerun()
+
 # Load existing data (may be empty initially)
 df = load_data_from_firestore()
 
@@ -247,7 +254,7 @@ if df.empty:
     st.stop()
 
 # ---------------- FILTERS (shared by tabs, only if data exists) ----------------
-st.sidebar.title("Filters")
+st.sidebar.markdown("### Filters")
 
 decision_options = ["Upgrade Soon", "Delay Upgrade", "Churn Risk"]
 selected_decisions = st.sidebar.multiselect(
