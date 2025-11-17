@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+matplotlib
+firebase-admin
+google-cloud-firestore
